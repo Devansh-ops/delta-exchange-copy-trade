@@ -14,6 +14,10 @@ WEBSOCKET_URL = "wss://socket.india.delta.exchange"
 API_KEY = os.getenv("DELTA_API_KEY")
 API_SECRET = os.getenv("DELTA_API_SECRET")
 
+
+if not API_KEY or not API_SECRET:
+    raise RuntimeError("Missing DELTA_API_KEY / DELTA_API_SECRET in .env")
+
 def on_error(ws, error):
     print(f"Socket Error: {error}")
 
@@ -54,8 +58,16 @@ def on_message(ws, message):
         subscribe(ws, "orders", ["all"])
         # subscribe positions channel for position updates for all contracts
         subscribe(ws, "positions", ["all"])
+        return
+    
+    # Print brief, log full
+    messageType = message_json.get("type")
+    if messageType in ("subscriptions", "positions", "orders"):
+        print({k: message_json[k] for k in ("type", "channels") if k in message_json} or {"type": messageType})
     else:
-      print(message_json)
+        print(message_json.get("type", "message"), "event")
+    
+    log_event(message_json)
 
 def subscribe(ws, channel, symbols):
     payload = {
@@ -71,7 +83,10 @@ def subscribe(ws, channel, symbols):
     }
     ws.send(json.dumps(payload))
 
+def log_event(ev):
+    with open("delta_ws_events.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+
 if __name__ == "__main__":
-  ws = websocket.WebSocketApp(WEBSOCKET_URL, on_message=on_message, on_error=on_error, on_close=on_close)
-  ws.on_open = on_open
-  ws.run_forever() # runs indefinitely
+  ws = websocket.WebSocketApp(WEBSOCKET_URL, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
+  ws.run_forever(ping_interval=30, ping_timeout=5, sslopt={"cert_reqs": 0}) # runs indefinitely
