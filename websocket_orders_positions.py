@@ -16,6 +16,9 @@ import websocket
 from dotenv import load_dotenv
 load_dotenv()
 
+# top-level
+seen_fill_ids: set[str] = set()
+
 # =========
 # Settings
 # =========
@@ -34,8 +37,10 @@ MAX_TOPUP_PER_TRADE = int(os.getenv("MAX_TOPUP_PER_TRADE", "1_000_000"))  # cont
 MAX_TOPUP_PER_SYMBOL = int(os.getenv("MAX_TOPUP_PER_SYMBOL", "10_000_000"))  # running session cap
 ALLOW_SYMBOLS = set(s.strip().upper() for s in os.getenv("ALLOW_SYMBOLS", "ALL").split(","))  # "ALL" or list: "BTCUSDT,ETHUSDT"
 TIF = os.getenv("TIME_IN_FORCE", "IOC")  # IOC or FOK where supported
-ORDER_TYPE = os.getenv("ORDER_TYPE", "market")  # "market" recommended (no price logic required)
 SELF_TAG_PREFIX = os.getenv("SELF_TAG_PREFIX", "BOTMULT_")  # used in client_order_id or text to mark our orders
+VERBOSE_DECISIONS = os.getenv("VERBOSE_DECISIONS", "true").lower() == "true"
+ORDER_TYPE = os.getenv("ORDER_TYPE", "market_order")  # 'market_order' or 'limit_order'
+USER_AGENT = os.getenv("USER_AGENT", "python-rest-client")
 
 # Reliability
 PING_INTERVAL = int(os.getenv("PING_INTERVAL", "30"))
@@ -64,6 +69,14 @@ def log_event(event_type, data):
     except Exception as e:
         print(f"[{now_ist_iso()}] Log write error: {e} | entry={entry}")
 
+# --- Helpers (below log_event)
+def log_skip(reason: str, ctx: dict):
+    if VERBOSE_DECISIONS:
+        log_event("skip", {"reason": reason, **ctx})
+
+def log_action(action: str, ctx: dict):
+    log_event("action", {"action": action, **ctx})
+
 # ===================
 # REST auth & orders
 # ===================
@@ -73,6 +86,7 @@ def _sign(method: str, path: str, timestamp: str, body: str = "") -> str:
     msg = method + timestamp + path + (body or "")
     return hmac.new(API_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
+# --- REST signing/headers
 def _headers(method: str, path: str, body_json: dict | None) -> dict:
     ts = str(int(time.time()))
     body = json.dumps(body_json, separators=(",", ":"), ensure_ascii=False) if body_json else ""
@@ -81,10 +95,12 @@ def _headers(method: str, path: str, body_json: dict | None) -> dict:
         "api-key": API_KEY,
         "timestamp": ts,
         "signature": sig,
+        "User-Agent": USER_AGENT,   # REQUIRED by Delta
     }
     if body_json is not None:
         h["Content-Type"] = "application/json"
     return h
+
 
 def rest_post(path: str, payload: dict) -> tuple[int, dict | str]:
     url = API_BASE.rstrip("/") + path
@@ -117,20 +133,17 @@ def place_order_topup(symbol: str | None, product_id: int | None, side: str, siz
         return 200, {"dry_run": True}
 
     body = {
-        # Prefer product_id if you have it; else many endpoints accept symbol. We send both when available.
-        "side": side.lower(),                  # "buy" or "sell"
-        "order_type": ORDER_TYPE.lower(),      # "market" recommended
-        "time_in_force": TIF.upper(),          # "IOC" or "FOK" if supported
-        "size": int(size),                     # contracts (same unit as provider)
+        "side": side.lower(),
+        "order_type": "market_order",   # must be 'market_order' or 'limit_order'
+        "time_in_force": TIF.lower(),  # 'gtc' or 'ioc'
+        "size": int(size),
         "reduce_only": False,
         "client_order_id": build_client_order_id(),
+        "product_id": int(product_id) if product_id is not None else None,
     }
-    if product_id is not None:
-        body["product_id"] = int(product_id)
-    if symbol is not None:
-        body["symbol"] = str(symbol).upper()
-
-    status, resp = rest_post("/orders", body)
+    body.pop("product_id", None) if product_id is None else None
+    status, resp = rest_post("/v2/orders", body)  # <-- v2 path
+    
     log_event("order_submit", {"status": status, "resp": resp, "req": body})
     if status != 200:
         print(f"[{now_ist_iso()}] ORDER ERROR status={status} resp={resp}")
@@ -194,25 +207,24 @@ def on_close(ws, code, msg):
 def generate_signature(secret, message):
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
 
+# --- send_auth (add a log before sending)
 def send_auth(ws):
-    # WS auth per /live signature: method+timestamp+path
     method = "GET"
     timestamp = str(int(time.time()))
     path = "/live"
     signature = generate_signature(API_SECRET, method + timestamp + path)
+    log_action("auth_send", {"timestamp": timestamp})
     ws.send(json.dumps({
         "type": "auth",
-        "payload": {
-            "api-key": API_KEY,
-            "signature": signature,
-            "timestamp": timestamp
-        }
+        "payload": {"api-key": API_KEY, "signature": signature, "timestamp": timestamp}
     }))
 
+# --- subscribe (log each subscription)
 def subscribe(ws, channel, symbols):
+    log_action("subscribe", {"channel": channel, "symbols": symbols})
     ws.send(json.dumps({
         "type": "subscribe",
-        "payload": { "channels": [ { "name": channel, "symbols": symbols } ] }
+        "payload": {"channels": [{"name": channel, "symbols": symbols}]}
     }))
 
 def on_open(ws):
@@ -246,23 +258,30 @@ def _extract_side(ev: dict) -> str | None:
         return "sell"
     return None
 
+# --- handle_usertrade (augment with decision logs)
 def handle_usertrade(ev: dict):
-    """
-    Preferred path: usertrades stream includes a single fill with its quantity.
-    """
+    fill_id = str(ev.get("fill_id") or "")
+    if fill_id and fill_id in seen_fill_ids:
+        log_skip("dup_fill_id", {"fill_id": fill_id})
+        return
+    if fill_id:
+        seen_fill_ids.add(fill_id)
     trade_id = str(ev.get("id") or ev.get("trade_id") or "")
+    audit_id = trade_id or ("ut_" + uuid.uuid4().hex[:8])
     if trade_id and trade_id in seen_trade_ids:
+        log_skip("dup_trade_id", {"audit_id": audit_id})
         return
     if trade_id:
         seen_trade_ids.add(trade_id)
 
     client_order_id = ev.get("client_order_id") or ev.get("client_id") or ev.get("text")
     if _looks_like_ours(client_order_id, ev.get("text")):
-        # Our own fill; ignore (prevents loops)
+        log_skip("own_fill", {"audit_id": audit_id, "client_order_id": client_order_id})
         return
 
     symbol = _extract_symbol(ev)
     if not _is_allowed_symbol(symbol):
+        log_skip("symbol_not_allowed", {"audit_id": audit_id, "symbol": symbol})
         return
 
     side = _extract_side(ev)
@@ -270,43 +289,57 @@ def handle_usertrade(ev: dict):
     try:
         qty = int(qty)
     except Exception:
+        log_skip("missing_or_invalid_qty", {"audit_id": audit_id})
         return
 
     add = compute_topup_size(qty)
     if add <= 0:
+        log_skip("zero_topup", {"audit_id": audit_id, "qty": qty, "multiplier": USER_MULTIPLIER})
         return
     if not _cap_ok(symbol, add):
-        log_event("cap_block", {"symbol": symbol, "add": add})
+        log_skip("symbol_cap_exceeded", {"audit_id": audit_id, "symbol": symbol, "add": add})
         return
 
     product_id = _extract_product(ev)
-    order_q.put({"symbol": symbol, "product_id": product_id, "side": side, "size": add})
+    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add}
+    order_q.put(job)
+    log_action("enqueue_topup", job)
 
+# --- handle_order_update (same style)
 def handle_order_update(ev: dict):
-    """
-    Fallback if usertrades is unavailable: detect incremental fills
-    using (cum_filled - last_seen).
-    """
+    fill_id = str(ev.get("fill_id") or "")
+    if fill_id:
+        if fill_id in seen_fill_ids:
+            log_skip("dup_fill_id_order", {"fill_id": fill_id})
+            return
+        seen_fill_ids.add(fill_id)
     client_order_id = ev.get("client_order_id") or ev.get("client_id") or ev.get("text")
     if _looks_like_ours(client_order_id, ev.get("text")):
-        return  # ours; ignore
+        log_skip("own_order_update", {"client_order_id": client_order_id})
+        return
 
     oid = str(ev.get("id") or ev.get("order_id") or "")
     if not oid:
+        log_skip("missing_order_id", {})
         return
+    audit_id = "ord_" + oid
+
     symbol = _extract_symbol(ev)
     if not _is_allowed_symbol(symbol):
+        log_skip("symbol_not_allowed", {"audit_id": audit_id, "symbol": symbol})
         return
 
     cum = ev.get("filled_size") or ev.get("total_filled") or ev.get("cumulative_qty")
     try:
         cum = int(cum)
     except Exception:
+        log_skip("missing_or_invalid_cum", {"audit_id": audit_id})
         return
 
     prev = order_fill_cum.get(oid, 0)
     if cum <= prev:
-        order_fill_cum[oid] = cum  # keep in sync
+        order_fill_cum[oid] = cum
+        log_skip("no_new_fill_delta", {"audit_id": audit_id, "cum": cum, "prev": prev})
         return
 
     delta = cum - prev
@@ -315,13 +348,16 @@ def handle_order_update(ev: dict):
     side = _extract_side(ev)
     add = compute_topup_size(delta)
     if add <= 0:
+        log_skip("zero_topup", {"audit_id": audit_id, "delta": delta})
         return
     if not _cap_ok(symbol, add):
-        log_event("cap_block", {"symbol": symbol, "add": add})
+        log_skip("symbol_cap_exceeded", {"audit_id": audit_id, "symbol": symbol, "add": add})
         return
 
     product_id = _extract_product(ev)
-    order_q.put({"symbol": symbol, "product_id": product_id, "side": side, "size": add})
+    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add}
+    order_q.put(job)
+    log_action("enqueue_topup", job)
 
 def on_message(ws, message):
     try:
@@ -335,11 +371,11 @@ def on_message(ws, message):
         # Subscribe to private channels after auth
         subscribe(ws, "orders", ["all"])
         subscribe(ws, "positions", ["all"])
-        # Subscribe to usertrades (sometimes named 'usertrades' / 'user_trades'); subscribe both for safety
-        subscribe(ws, "usertrades", ["all"])
+        # Subscribe to user_trades
         subscribe(ws, "user_trades", ["all"])
         print(f"[{now_ist_iso()}] Authenticated. Subscribed to orders/positions/usertrades.")
         log_event("subscriptions", {"ok": True})
+        ws.send(json.dumps({"type": "enable_heartbeat"}))  # optional
         return
 
     log_event("message", msg)
@@ -368,43 +404,46 @@ def on_message(ws, message):
 # Worker to place top-ups
 # =========================
 
+# --- order_worker (log dequeue/result)
 def order_worker():
     while True:
         job = order_q.get()
         if job is None:
             return
-        symbol = job.get("symbol")
-        product_id = job.get("product_id")
-        side = job.get("side")
-        size = int(job.get("size", 0))
+        log_action("dequeue_topup", job)
+
+        symbol = job.get("symbol"); product_id = job.get("product_id")
+        side = job.get("side"); size = int(job.get("size", 0))
 
         if size <= 0 or side not in ("buy", "sell"):
+            log_skip("invalid_job", job)
             continue
         if not _cap_ok(symbol, size):
+            log_skip("symbol_cap_exceeded_worker", {"symbol": symbol, "add": size, **job})
             continue
 
         status, resp = place_order_topup(symbol, product_id, side, size)
+        result = {"status": status, "resp": resp, **job}
+        log_action("order_result", result)
         if status == 200:
             _bump_cap(symbol, size)
         else:
-            # Small randomized backoff on errors
             time.sleep(0.25 + random.random() * 0.75)
 
+# --- run_ws_forever (log backoff)
 def run_ws_forever():
     backoff = 1
     while True:
         ws = websocket.WebSocketApp(
-            WEBSOCKET_URL,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
+            WEBSOCKET_URL, on_open=on_open, on_message=on_message,
+            on_error=on_error, on_close=on_close
         )
         ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT, sslopt={"cert_reqs": 0})
+        log_action("reconnect_wait", {"seconds": backoff})
         print(f"[{now_ist_iso()}] Reconnecting in {backoff}s…")
         time.sleep(backoff)
         backoff = min(backoff * 2, 60)
-
+        
 def shutdown():
     try:
         order_q.put(None)
