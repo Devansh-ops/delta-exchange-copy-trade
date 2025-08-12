@@ -134,7 +134,7 @@ def place_order_topup(symbol: str | None, product_id: int | None, side: str, siz
 
     body = {
         "side": side.lower(),
-        "order_type": "market_order",   # must be 'market_order' or 'limit_order'
+        "order_type": ORDER_TYPE,   # must be 'market_order' or 'limit_order'
         "time_in_force": TIF.lower(),  # 'gtc' or 'ioc'
         "size": int(size),
         "reduce_only": False,
