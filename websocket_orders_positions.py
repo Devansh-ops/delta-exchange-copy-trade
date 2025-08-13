@@ -59,8 +59,8 @@ LAST_CONN_OK_AT = 0.0
 # Dedup store limits (keep your envs)
 FILL_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
 FILL_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
-TRADE_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
-TRADE_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
+TRADE_ID_TTL_SEC = int(os.getenv("TRADE_ID_TTL_SEC", "86400"))   # 24h
+TRADE_ID_MAX     = int(os.getenv("TRADE_ID_MAX", "200000"))
 
 # Harden HTTP
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))         # read timeout (s)
