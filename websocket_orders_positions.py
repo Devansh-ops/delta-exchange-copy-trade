@@ -14,6 +14,8 @@ import requests
 import websocket
 from cachetools import TTLCache
 import ssl
+import sys
+import signal
 from time import monotonic as _now
 from dotenv import load_dotenv
 load_dotenv()
@@ -64,6 +66,11 @@ TRADE_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))         # read timeout (s)
 HTTP_CONN_TIMEOUT = float(os.getenv("HTTP_CONN_TIMEOUT", "3.05"))
 HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
+
+# Shutdown / exit
+STOP_EVENT = threading.Event()
+CURRENT_WS = None          # set each time we create a WebSocketApp
+SHUTDOWN_ONCE = threading.Event()
 
 # top-level
 seen_fill_ids = TTLCache(maxsize=FILL_ID_MAX, ttl=FILL_ID_TTL_SEC)
@@ -303,6 +310,25 @@ def _extract_side(ev: dict) -> str | None:
         return "sell"
     return None
 
+def _handle_sig(sig_num, _frame):
+    log_action("signal", {"sig": int(sig_num)})
+    shutdown(reason=f"signal_{int(sig_num)}")
+
+# Linux/macOS
+signal.signal(signal.SIGINT, _handle_sig)
+try:
+    signal.signal(signal.SIGTERM, _handle_sig)
+except Exception:
+    pass  # Windows may not have SIGTERM
+
+# Windows consoles sometimes use SIGBREAK
+if hasattr(signal, "SIGBREAK"):
+    try:
+        signal.signal(signal.SIGBREAK, _handle_sig)
+    except Exception:
+        pass
+
+
 # --- handle_usertrade (augment with decision logs)
 def handle_usertrade(ev: dict):
     fill_id = str(ev.get("fill_id") or "")
@@ -457,7 +483,7 @@ def on_message(ws, message):
 
 # --- order_worker (log dequeue/result)
 def order_worker():
-    while True:
+    while not STOP_EVENT.is_set():
         job = order_q.get()
         if job is None:
             return
@@ -479,7 +505,10 @@ def order_worker():
         if status == 200:
             _bump_cap(symbol, size)
         else:
-            time.sleep(0.25 + random.random() * 0.75)
+            # brief backoff on error, but also allow prompt shutdown
+            for _ in range(5):
+                if STOP_EVENT.is_set(): break
+                time.sleep(0.25 + random.random() * 0.75)
 
 # --- run_ws_forever (log backoff)
 def run_ws_forever():
@@ -491,8 +520,15 @@ def run_ws_forever():
             WEBSOCKET_URL, on_open=on_open, on_message=on_message,
             on_error=on_error, on_close=on_close
         )
+        # expose current ws so shutdown() can close it
+        global CURRENT_WS
+        CURRENT_WS = ws
         sslopt = {"cert_reqs": ssl.CERT_NONE} if WS_INSECURE else {"cert_reqs": ssl.CERT_REQUIRED}
         ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT, sslopt=sslopt)
+        CURRENT_WS = None
+        
+        if STOP_EVENT.is_set():
+            break
         
         # Decide next backoff
         had_health = LAST_CONN_OK_AT >= session_start
@@ -501,17 +537,45 @@ def run_ws_forever():
         
         log_action("reconnect_wait", {"seconds": round(wait, 3), "had_health": had_health})
         print(f"[{now_ist_iso()}] Reconnecting in {wait:.2f}s…")
-        time.sleep(wait)
+        for _ in range(int(wait * 10)):
+            if STOP_EVENT.is_set(): break
+            time.sleep(0.1)
         
-def shutdown():
+# Graceful shutdown
+def shutdown(reason="external"):
+    # idempotent
+    if SHUTDOWN_ONCE.is_set():
+        return
+    SHUTDOWN_ONCE.set()
+
+    log_action("shutdown_start", {"reason": reason})
+    STOP_EVENT.set()
+    # wake the worker if it's blocked on .get()
     try:
-        order_q.put(None)
+        order_q.put_nowait(None)
     except Exception:
         pass
+
+    # close the websocket so run_forever() returns
+    try:
+        if CURRENT_WS is not None:
+            CURRENT_WS.close()             # triggers on_close -> run_forever returns
+    except Exception as e:
+        log_event("warn", f"ws_close_failed: {e}")
+
+    log_action("shutdown_signal_sent", {})
 
 if __name__ == "__main__":
     print(f"[{now_ist_iso()}] Starting Delta multiplier bot | multiplier={USER_MULTIPLIER} | DRY_RUN={DRY_RUN}")
     atexit.register(shutdown)
-    t = threading.Thread(target=order_worker, daemon=True)
-    t.start()
-    run_ws_forever()
+    worker = threading.Thread(target=order_worker, daemon=False)
+    worker.start()
+    try:
+        run_ws_forever()
+    finally:
+        # ensure shutdown path if we fell out due to exception
+        shutdown("finally")
+        # give the worker up to 5s to finish current REST call and exit
+        worker.join(timeout=5.0)
+        log_action("shutdown_done", {})
+        sys.exit(0)
