@@ -1,0 +1,24 @@
+# virtual envs & build caches
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# local tooling
+.vscode/
+.idea/
+.DS_Store
+
+# runtime artifacts
+logs/
+*.log
+
+# secrets
+.env
+.env.*
+*.pem
+
+# git
+.git
+.gitignore

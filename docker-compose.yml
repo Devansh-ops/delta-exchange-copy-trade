@@ -1,0 +1,18 @@
+services:
+  delta-exchange-copy-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: delta-exchange-bot:latest
+    container_name: delta-exchange-copy-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    # If you want to override defaults at runtime:
+    # environment:
+    #   - USER_MULTIPLIER=2.0
+    #   - DRY_RUN=false
+    #   - ORDER_TYPE=market_order
+    #   - TIME_IN_FORCE=IOC
