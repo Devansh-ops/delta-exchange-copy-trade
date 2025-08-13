@@ -6,7 +6,6 @@ import uuid
 import queue
 import atexit
 import random
-import string
 import hashlib
 import datetime
 import threading
@@ -14,7 +13,7 @@ import pytz
 import requests
 import websocket
 from cachetools import TTLCache
-import threading
+import ssl
 from time import monotonic as _now
 from dotenv import load_dotenv
 load_dotenv()
@@ -29,6 +28,7 @@ WEBSOCKET_URL = os.getenv("DELTA_WS_URL", "wss://socket.india.delta.exchange")
 API_BASE = os.getenv("DELTA_API_BASE", "https://api.india.delta.exchange")  # change to https://api.delta.exchange if needed
 API_KEY = os.getenv("DELTA_API_KEY")
 API_SECRET = os.getenv("DELTA_API_SECRET")
+WS_INSECURE = os.getenv("WS_INSECURE", "false").lower() == "true"
 
 # Business logic
 USER_MULTIPLIER = float(os.getenv("USER_MULTIPLIER", "2.0"))  # e.g., 2.0 means "match + 1x top-up"
@@ -57,6 +57,13 @@ LAST_CONN_OK_AT = 0.0
 # Dedup store limits (keep your envs)
 FILL_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
 FILL_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
+TRADE_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
+TRADE_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
+
+# Harden HTTP
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))         # read timeout (s)
+HTTP_CONN_TIMEOUT = float(os.getenv("HTTP_CONN_TIMEOUT", "3.05"))
+HTTP_RETRIES = int(os.getenv("HTTP_RETRIES", "3"))
 
 # top-level
 seen_fill_ids = TTLCache(maxsize=FILL_ID_MAX, ttl=FILL_ID_TTL_SEC)
@@ -118,14 +125,37 @@ def _headers(method: str, path: str, body_json: dict | None) -> dict:
 def rest_post(path: str, payload: dict) -> tuple[int, dict | str]:
     url = API_BASE.rstrip("/") + path
     headers = _headers("POST", path, payload)
-    try:
-        r = requests.post(url, headers=headers, data=json.dumps(payload, separators=(",", ":")))
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            return r.status_code, r.json()
-        except Exception:
-            return r.status_code, r.text
-    except Exception as e:
-        return 0, str(e)
+            r = requests.post(
+                url,
+                headers=headers,
+                data=json.dumps(payload, separators=(",", ":")),
+                timeout=(HTTP_CONN_TIMEOUT, HTTP_TIMEOUT),
+            )
+            status = r.status_code
+            try:
+                data = r.json()
+            except Exception:
+                data = r.text
+
+            # Retry on rate-limit or transient server errors
+            if attempt < HTTP_RETRIES and (status == 429 or 500 <= status < 600):
+                sleep_s = min(0.5 * (2 ** (attempt - 1)), 4.0) * (1 + random.random()*0.25)
+                log_action("rest_retry", {"status": status, "attempt": attempt, "sleep": round(sleep_s, 2)})
+            else:
+                return status, data
+
+            time.sleep(sleep_s)
+        except Exception as e:
+            if attempt >= HTTP_RETRIES:
+                return 0, str(e)
+            sleep_s = min(0.5 * (2 ** (attempt - 1)), 4.0) * (1 + random.random()*0.25)
+            log_action("rest_exc_retry", {"attempt": attempt, "sleep": round(sleep_s, 2), "err": str(e)})
+            time.sleep(sleep_s)
+
 
 # Build a unique client ID we can recognize in WS streams
 def build_client_order_id() -> str:
@@ -174,7 +204,9 @@ order_q: "queue.Queue[dict]" = queue.Queue(maxsize=1000)
 # Track what's ours, and caps per symbol
 our_client_prefix = SELF_TAG_PREFIX
 session_topup_used: dict[str, int] = {}  # symbol->contracts we've added this session
-seen_trade_ids: set[str] = set()         # de-dup usertrades
+seen_trade_ids = TTLCache(maxsize=TRADE_ID_MAX, ttl=TRADE_ID_TTL_SEC)
+
+# de-dup usertrades
 order_fill_cum: dict[str, int] = {}      # order_id->last_seen_cum_filled (for orders channel fallback)
 
 def _is_allowed_symbol(symbol: str | None) -> bool:
@@ -285,7 +317,7 @@ def handle_usertrade(ev: dict):
         log_skip("dup_trade_id", {"audit_id": audit_id})
         return
     if trade_id:
-        seen_trade_ids.add(trade_id)
+        seen_trade_ids[trade_id] = True
 
     client_order_id = ev.get("client_order_id") or ev.get("client_id") or ev.get("text")
     if _looks_like_ours(client_order_id, ev.get("text")):
@@ -459,7 +491,8 @@ def run_ws_forever():
             WEBSOCKET_URL, on_open=on_open, on_message=on_message,
             on_error=on_error, on_close=on_close
         )
-        ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT, sslopt={"cert_reqs": 0})
+        sslopt = {"cert_reqs": ssl.CERT_NONE} if WS_INSECURE else {"cert_reqs": ssl.CERT_REQUIRED}
+        ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT, sslopt=sslopt)
         
         # Decide next backoff
         had_health = LAST_CONN_OK_AT >= session_start
