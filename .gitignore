@@ -1,5 +1,27 @@
-.env
+# venvs & envs
 .venv/
+.env
+.env.*.local
+*.env
+
+# caches / build
 __pycache__/
-delta_ws_events.jsonl
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# logs & runtime
 logs/
+*.log
+*.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
