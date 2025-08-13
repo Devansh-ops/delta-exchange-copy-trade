@@ -15,6 +15,7 @@ import requests
 import websocket
 from cachetools import TTLCache
 import threading
+from time import monotonic as _now
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -46,6 +47,12 @@ PING_INTERVAL = int(os.getenv("PING_INTERVAL", "30"))
 PING_TIMEOUT = int(os.getenv("PING_TIMEOUT", "5"))
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Backoff 
+BACKOFF_BASE = float(os.getenv("BACKOFF_BASE", "1.0"))
+BACKOFF_MAX  = float(os.getenv("BACKOFF_MAX", "60.0"))
+BACKOFF_JITTER = float(os.getenv("BACKOFF_JITTER", "0.4"))  # 0..0.4x
+LAST_CONN_OK_AT = 0.0
 
 # Dedup store limits (keep your envs)
 FILL_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
@@ -366,6 +373,7 @@ def handle_order_update(ev: dict):
     log_action("enqueue_topup", job)
 
 def on_message(ws, message):
+    global LAST_CONN_OK_AT
     try:
         msg = json.loads(message)
     except Exception:
@@ -374,6 +382,7 @@ def on_message(ws, message):
 
     t = msg.get("type")
     if t == "success" and msg.get("message") == "Authenticated":
+        LAST_CONN_OK_AT = _now()
         # Subscribe to private channels after auth
         subscribe(ws, "orders", ["all"])
         subscribe(ws, "positions", ["all"])
@@ -381,11 +390,11 @@ def on_message(ws, message):
         subscribe(ws, "user_trades", ["all"])
         print(f"[{now_ist_iso()}] Authenticated. Subscribed to orders/positions/usertrades.")
         log_event("subscriptions", {"ok": True})
-        # ws.send(json.dumps({"type": "enable_heartbeat"}))  # optional
+        ws.send(json.dumps({"type": "enable_heartbeat"}))  # optional
         return
 
-    # if t == "heartbeat":
-    #     return
+    if t == "heartbeat":
+        LAST_CONN_OK_AT = _now()
 
     log_event("message", msg)
 
@@ -441,17 +450,24 @@ def order_worker():
 
 # --- run_ws_forever (log backoff)
 def run_ws_forever():
-    backoff = 1
+    global LAST_CONN_OK_AT
+    backoff = BACKOFF_BASE
     while True:
+        session_start = _now()
         ws = websocket.WebSocketApp(
             WEBSOCKET_URL, on_open=on_open, on_message=on_message,
             on_error=on_error, on_close=on_close
         )
         ws.run_forever(ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT, sslopt={"cert_reqs": 0})
-        log_action("reconnect_wait", {"seconds": backoff})
-        print(f"[{now_ist_iso()}] Reconnecting in {backoff}s…")
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 60)
+        
+        # Decide next backoff
+        had_health = LAST_CONN_OK_AT >= session_start
+        backoff = BACKOFF_BASE if had_health else min(backoff * 2.0, BACKOFF_MAX)
+        wait = backoff * (1.0 + random.uniform(0.0, BACKOFF_JITTER))
+        
+        log_action("reconnect_wait", {"seconds": round(wait, 3), "had_health": had_health})
+        print(f"[{now_ist_iso()}] Reconnecting in {wait:.2f}s…")
+        time.sleep(wait)
         
 def shutdown():
     try:
