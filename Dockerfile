@@ -3,7 +3,8 @@
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim AS base
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_SYSTEM_PYTHON=1 \
@@ -34,12 +35,8 @@ RUN uv venv ${VIRTUAL_ENV} \
 # Now copy the rest of the source
 COPY . .
 
-# Create non-root user and fix permissions for logs/working dir
-RUN useradd -m -u 10001 appuser \
- && mkdir -p /app/logs \
- && chown -R appuser:appuser /app
-
-USER appuser
+# (optional) create logs dir; bind mounts will overlay it anyway
+RUN mkdir -p /app/logs
 
 # (Optional) Switch timezone in container if you want system time to match IST
 # ENV TZ=Asia/Kolkata
