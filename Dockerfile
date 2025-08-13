@@ -18,8 +18,9 @@ RUN apt-get update \
 WORKDIR /app
 
 # ---- install uv & deps using lockfile (best cache hit) ----
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh -s -- --yes \
- && ln -s /root/.local/bin/uv /usr/local/bin/uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ && ln -sf /root/.local/bin/uv /usr/local/bin/uv \
+ && uv --version
 
 # Copy just dependency files first for better caching
 COPY pyproject.toml uv.lock ./
