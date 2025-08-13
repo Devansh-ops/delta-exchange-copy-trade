@@ -395,6 +395,7 @@ def on_message(ws, message):
 
     if t == "heartbeat":
         LAST_CONN_OK_AT = _now()
+        return
 
     log_event("message", msg)
 
