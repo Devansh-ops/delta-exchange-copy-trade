@@ -1,7 +1,7 @@
 [project]
-name = "delta-exchange"
+name = "delta-exchange-copy-trade"
 version = "0.1.0"
-description = "Add your description here"
+description = "Copy trades done on delta exchange"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
