@@ -13,11 +13,10 @@ import threading
 import pytz
 import requests
 import websocket
+from cachetools import TTLCache
+import threading
 from dotenv import load_dotenv
 load_dotenv()
-
-# top-level
-seen_fill_ids: set[str] = set()
 
 # =========
 # Settings
@@ -47,6 +46,13 @@ PING_INTERVAL = int(os.getenv("PING_INTERVAL", "30"))
 PING_TIMEOUT = int(os.getenv("PING_TIMEOUT", "5"))
 LOG_DIR = os.getenv("LOG_DIR", "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# Dedup store limits (keep your envs)
+FILL_ID_TTL_SEC = int(os.getenv("FILL_ID_TTL_SEC", "86400"))   # 24h
+FILL_ID_MAX     = int(os.getenv("FILL_ID_MAX", "200000"))
+
+# top-level
+seen_fill_ids = TTLCache(maxsize=FILL_ID_MAX, ttl=FILL_ID_TTL_SEC)
 
 if not API_KEY or not API_SECRET:
     raise RuntimeError("Missing DELTA_API_KEY / DELTA_API_SECRET in environment")
@@ -265,7 +271,7 @@ def handle_usertrade(ev: dict):
         log_skip("dup_fill_id", {"fill_id": fill_id})
         return
     if fill_id:
-        seen_fill_ids.add(fill_id)
+        seen_fill_ids[fill_id] = True
     trade_id = str(ev.get("id") or ev.get("trade_id") or "")
     audit_id = trade_id or ("ut_" + uuid.uuid4().hex[:8])
     if trade_id and trade_id in seen_trade_ids:
@@ -312,7 +318,7 @@ def handle_order_update(ev: dict):
         if fill_id in seen_fill_ids:
             log_skip("dup_fill_id_order", {"fill_id": fill_id})
             return
-        seen_fill_ids.add(fill_id)
+        seen_fill_ids[fill_id] = True
     client_order_id = ev.get("client_order_id") or ev.get("client_id") or ev.get("text")
     if _looks_like_ours(client_order_id, ev.get("text")):
         log_skip("own_order_update", {"client_order_id": client_order_id})
@@ -375,8 +381,11 @@ def on_message(ws, message):
         subscribe(ws, "user_trades", ["all"])
         print(f"[{now_ist_iso()}] Authenticated. Subscribed to orders/positions/usertrades.")
         log_event("subscriptions", {"ok": True})
-        ws.send(json.dumps({"type": "enable_heartbeat"}))  # optional
+        # ws.send(json.dumps({"type": "enable_heartbeat"}))  # optional
         return
+
+    # if t == "heartbeat":
+    #     return
 
     log_event("message", msg)
 
