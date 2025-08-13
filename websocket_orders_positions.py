@@ -42,6 +42,8 @@ TIF = os.getenv("TIME_IN_FORCE", "IOC")  # IOC or FOK where supported
 SELF_TAG_PREFIX = os.getenv("SELF_TAG_PREFIX", "BOTMULT_")  # used in client_order_id or text to mark our orders
 VERBOSE_DECISIONS = os.getenv("VERBOSE_DECISIONS", "true").lower() == "true"
 ORDER_TYPE = os.getenv("ORDER_TYPE", "market_order")  # 'market_order' or 'limit_order'
+LIMIT_SLIPPAGE_BPS = float(os.getenv("LIMIT_SLIPPAGE_BPS", "0"))  # e.g., 1.5 = 1.5 bps; 0 disables
+LIMIT_IOC_FALLBACK_MARKET = os.getenv("LIMIT_IOC_FALLBACK_MARKET", "true").lower() == "true"
 USER_AGENT = os.getenv("USER_AGENT", "python-rest-client")
 
 # Reliability
@@ -169,7 +171,22 @@ def build_client_order_id() -> str:
     suffix = uuid.uuid4().hex[:10]
     return f"{SELF_TAG_PREFIX}{suffix}"
 
-def place_order_topup(symbol: str | None, product_id: int | None, side: str, size: int):
+
+def _adjust_limit(side: str, base_price: str | None) -> str | None:
+    if not base_price:
+        return None
+    try:
+        p = float(base_price)
+    except Exception:
+        return None
+    slip = LIMIT_SLIPPAGE_BPS / 10_000.0
+    if slip > 0:
+        p = p * (1.0 + slip) if side == "buy" else p * (1.0 - slip)
+    # keep plenty of precision; exchange will round if needed
+    s = f"{p:.8f}".rstrip('0').rstrip('.')
+    return s
+
+def place_order_topup(symbol: str | None, product_id: int | None, side: str, size: int, price: str | None = None):
     """
     Places our top-up order. Uses MARKET + IOC by default to avoid leaving rests.
     We tag with client_order_id to prevent loops.
@@ -178,8 +195,8 @@ def place_order_topup(symbol: str | None, product_id: int | None, side: str, siz
         return 200, {"skipped": "non_positive_size"}
 
     if DRY_RUN:
-        log_event("dry_run_order", {"symbol": symbol, "product_id": product_id, "side": side, "size": size})
-        print(f"[{now_ist_iso()}] DRY_RUN place {side} {size} on {symbol or product_id}")
+        log_event("dry_run_order", {"symbol": symbol, "product_id": product_id, "side": side, "size": size, "price": price})
+        print(f"[{now_ist_iso()}] DRY_RUN place {side} {size} on {symbol or product_id} ({ORDER_TYPE}, {price})")
         return 200, {"dry_run": True}
 
     body = {
@@ -191,6 +208,14 @@ def place_order_topup(symbol: str | None, product_id: int | None, side: str, siz
         "client_order_id": build_client_order_id(),
         "product_id": int(product_id) if product_id is not None else None,
     }
+    
+    if ORDER_TYPE == "limit_order":
+        adj = _adjust_limit(side.lower(), price)
+        if not adj:
+            log_skip("missing_limit_price", {"symbol": symbol, "side": side, "size": size})
+            return 400, {"error": "missing_limit_price"}
+        body["limit_price"] = adj
+    
     body.pop("product_id", None) if product_id is None else None
     status, resp = rest_post("/v2/orders", body)  # <-- v2 path
     
@@ -198,7 +223,28 @@ def place_order_topup(symbol: str | None, product_id: int | None, side: str, siz
     if status != 200:
         print(f"[{now_ist_iso()}] ORDER ERROR status={status} resp={resp}")
     else:
-        print(f"[{now_ist_iso()}] Placed top-up: {side} {size} {symbol or product_id}")
+        print(f"[{now_ist_iso()}] Placed top-up: {side} {size} {symbol or product_id} ({ORDER_TYPE} @ {body.get('limit_price')})")
+    
+    # Optional: fallback to market if IOC limit couldn't fill
+    if (status == 200 and isinstance(resp, dict)
+        and (resp.get("result") or {}).get("state") == "cancelled"
+        and (resp["result"].get("cancellation_reason") == "order_size_not_available_in_orderbook")
+        and ORDER_TYPE == "limit_order" and TIF.lower() == "ioc"
+        and LIMIT_IOC_FALLBACK_MARKET and not DRY_RUN):
+        log_action("limit_ioc_cancel_fallback", {
+            "symbol": symbol, "side": side, "size": size, "limit_price": body.get("limit_price")
+        })
+        print(f"[{now_ist_iso()}] IOC top-up order failed : {side} {size} {symbol or product_id} ({ORDER_TYPE} @ {body.get('limit_price')})")
+        
+        body2 = body.copy()
+        body2["order_type"] = "market_order"
+        body2["client_order_id"] = build_client_order_id()
+        body2.pop("limit_price", None)
+        status2, resp2 = rest_post("/v2/orders", body2)
+        log_event("order_submit", {"status": status2, "resp": resp2, "req": body2})
+        print(f"[{now_ist_iso()}] Placed market order : {side} {size} {symbol or product_id}")
+        return status2, resp2
+    
     return status, resp
 
 # ===============================
@@ -372,7 +418,10 @@ def handle_usertrade(ev: dict):
         return
 
     product_id = _extract_product(ev)
-    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add}
+    
+    price = ev.get("price")
+    
+    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add, "price": price}
     order_q.put(job)
     log_action("enqueue_topup", job)
 
@@ -394,6 +443,11 @@ def handle_order_update(ev: dict):
         log_skip("missing_order_id", {})
         return
     audit_id = "ord_" + oid
+    
+    state = (ev.get("state") or "").lower()
+    unfilled = ev.get("unfilled_size")
+    if state == "closed" or unfilled in (0, "0"):
+        order_fill_cum.pop(oid, None)
 
     symbol = _extract_symbol(ev)
     if not _is_allowed_symbol(symbol):
@@ -426,7 +480,10 @@ def handle_order_update(ev: dict):
         return
 
     product_id = _extract_product(ev)
-    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add}
+    
+    price = ev.get("average_fill_price") or ev.get("price")
+    
+    job = {"audit_id": audit_id, "symbol": symbol, "product_id": product_id, "side": side, "size": add, "price": price}
     order_q.put(job)
     log_action("enqueue_topup", job)
 
@@ -499,7 +556,7 @@ def order_worker():
             log_skip("symbol_cap_exceeded_worker", {"symbol": symbol, "add": size, **job})
             continue
 
-        status, resp = place_order_topup(symbol, product_id, side, size)
+        status, resp = place_order_topup(symbol, product_id, side, size, price=job.get("price"))
         result = {"status": status, "resp": resp, **job}
         log_action("order_result", result)
         if status == 200:
