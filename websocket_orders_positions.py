@@ -380,7 +380,6 @@ def handle_usertrade(ev: dict):
     fill_id = str(ev.get("fill_id") or "")
     if fill_id and fill_id in seen_fill_ids:
         log_skip("dup_fill_id", {"fill_id": fill_id})
-        seen_fill_ids[fill_id] = True
         return
     if fill_id:
         seen_fill_ids[fill_id] = True
@@ -388,7 +387,6 @@ def handle_usertrade(ev: dict):
     audit_id = trade_id or ("ut_" + uuid.uuid4().hex[:8])
     if trade_id and trade_id in seen_trade_ids:
         log_skip("dup_trade_id", {"audit_id": audit_id})
-        seen_trade_ids[trade_id] = True
         return
     if trade_id:
         seen_trade_ids[trade_id] = True
@@ -433,7 +431,6 @@ def handle_order_update(ev: dict):
     if fill_id:
         if fill_id in seen_fill_ids:
             log_skip("dup_fill_id_order", {"fill_id": fill_id})
-            seen_fill_ids[fill_id] = True
             return
         seen_fill_ids[fill_id] = True
     client_order_id = ev.get("client_order_id") or ev.get("client_id") or ev.get("text")
