@@ -27,6 +27,7 @@ jobs:
     outputs:
       has_requirements: ${{ steps.flags.outputs.has_requirements }}
       has_pyproject: ${{ steps.flags.outputs.has_pyproject }}
+      has_uv_lock: ${{ steps.flags.outputs.has_uv_lock }}
       has_node_locks: ${{ steps.flags.outputs.has_node_locks }}
       has_dockerfile: ${{ steps.flags.outputs.has_dockerfile }}
     steps:
@@ -36,11 +37,13 @@ jobs:
           echo "Scanning tree for key files…"
           has_requirements=$(find . -type f -iname 'requirements*.txt' | grep -q . && echo true || echo false)
           has_pyproject=$([ -f pyproject.toml ] && echo true || echo false)
+          has_uv_lock=$([ -f uv.lock ] && echo true || echo false)
           has_node_locks=$(find . -type f \( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \) | grep -q . && echo true || echo false)
           has_dockerfile=$([ -f Dockerfile ] && echo true || echo false)
 
           echo "has_requirements=$has_requirements" >> "$GITHUB_OUTPUT"
           echo "has_pyproject=$has_pyproject"     >> "$GITHUB_OUTPUT"
+          echo "has_uv_lock=$has_uv_lock"         >> "$GITHUB_OUTPUT"
           echo "has_node_locks=$has_node_locks"   >> "$GITHUB_OUTPUT"
           echo "has_dockerfile=$has_dockerfile"   >> "$GITHUB_OUTPUT"
 
@@ -70,61 +73,56 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      # The action already runs `gitleaks detect` under the hood — don't repeat "detect" in args.
+        with:
+          fetch-depth: 0  # scan full history (recommended)
+
+      # v2 uses envs; it will create results.sarif by default
       - name: Run Gitleaks
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true   # don’t block upload if leaks are found
-        with:
-          args: "--path=. --no-git"
-          report-format: "sarif"
-          report-path: "gitleaks.sarif"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE only if this is an org repo
+
+      # Make sure a SARIF exists so upload never crashes the job
+      - name: Ensure SARIF exists
+        run: test -f results.sarif || echo '{"version":"2.1.0","runs":[]}' > results.sarif
 
       - name: Upload SARIF (Gitleaks)
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: gitleaks.sarif
+          sarif_file: results.sarif   # <- gitleaks’ default filename
           category: gitleaks
 
   deps-python:
-    name: "Python dependency audit"
+    name: "OSV Scanner (Python deps)"
     needs: detect
-    if: ${{ needs.detect.outputs.has_requirements == 'true' || needs.detect.outputs.has_pyproject == 'true' }}
+    if: ${{ needs.detect.outputs.has_requirements == 'true' || needs.detect.outputs.has_pyproject == 'true' || needs.detect.outputs.has_uv_lock == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      # OSV-Scanner action: scans manifests & lockfiles, supports uv.lock/pyproject
+      - name: Run OSV-Scanner (recursive, SARIF)
+        uses: google/osv-scanner-action@v1
         with:
-          python-version: "3.x"
-      - name: Install uv & pip-audit
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv pip-audit
-      - name: Prepare lock for audit (uv -> requirements)
-        shell: bash
-        run: |
-          set -e
-          if [ -f pyproject.toml ]; then
-            # Export pinned deps from uv project; fallback for older uv if flags differ
-            uv export --format=requirements-txt --output requirements.audit.txt 2>/dev/null || \
-            uv export -o requirements.audit.txt
-          elif ls requirements*.txt >/dev/null 2>&1; then
-            # Use the first requirements file we find
-            head -n 1 requirements*.txt >/dev/null # just to ensure it exists
-            cp "$(ls requirements*.txt | head -n1)" requirements.audit.txt
-          fi
-          echo "Using requirements.audit.txt:"
-          head -n 5 requirements.audit.txt || true
-      - name: Run pip-audit (SARIF)
-        run: |
-          pip-audit -r requirements.audit.txt -f sarif -o pip-audit.sarif || true
-      - name: Upload SARIF (pip-audit)
+          scan-args: >-
+            --recursive
+            --format=sarif
+            --output=osv.sarif
+            .
+
+      - name: Ensure SARIF exists (belt & suspenders)
+        run: test -f osv.sarif || echo '{"version":"2.1.0","runs":[]}' > osv.sarif
+
+      - name: Upload SARIF (OSV)
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: pip-audit.sarif
-          category: pip-audit
+          sarif_file: osv.sarif
+          category: osv-scanner
 
   deps-node:
     name: "Node dependency audit"
