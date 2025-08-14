@@ -20,8 +20,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  detect:
+    name: "Detect repo features"
+    runs-on: ubuntu-latest
+    outputs:
+      has_requirements: ${{ steps.flags.outputs.has_requirements }}
+      has_node_locks: ${{ steps.flags.outputs.has_node_locks }}
+      has_dockerfile: ${{ steps.flags.outputs.has_dockerfile }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: flags
+        run: |
+          echo "Scanning tree for key files…"
+          has_requirements=$(find . -type f -name 'requirements.txt' | grep -q . && echo true || echo false)
+          has_node_locks=$(find . -type f \( -name 'package-lock.json' -o -name 'yarn.lock' -o -name 'pnpm-lock.yaml' \) | grep -q . && echo true || echo false)
+          has_dockerfile=$([ -f Dockerfile ] && echo true || echo false)
+
+          echo "has_requirements=$has_requirements" >> "$GITHUB_OUTPUT"
+          echo "has_node_locks=$has_node_locks"   >> "$GITHUB_OUTPUT"
+          echo "has_dockerfile=$has_dockerfile"   >> "$GITHUB_OUTPUT"
+
   codeql:
-    name: CodeQL (SAST)
+    name: "CodeQL (SAST)"
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -39,7 +59,7 @@ jobs:
       - uses: github/codeql-action/analyze@v3
 
   secrets:
-    name: Secret scanning (gitleaks)
+    name: "Secret scanning (gitleaks)"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,9 +77,10 @@ jobs:
           category: gitleaks
 
   deps-python:
-    name: Python dependency audit
+    name: "Python dependency audit"
+    needs: detect
+    if: ${{ needs.detect.outputs.has_requirements == 'true' }}
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('**/requirements.txt') != '' }}
     permissions:
       contents: read
       security-events: write
@@ -80,9 +101,10 @@ jobs:
           category: pip-audit
 
   deps-node:
-    name: Node dependency audit
+    name: "Node dependency audit"
+    needs: detect
+    if: ${{ needs.detect.outputs.has_node_locks == 'true' }}
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock') != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -94,7 +116,7 @@ jobs:
           if [ -f yarn.lock ]; then corepack enable && yarn install --ignore-scripts --frozen-lockfile; fi
           if [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --ignore-scripts --frozen-lockfile; fi
       - name: npm audit (fail on high+)
-        if: ${{ hashFiles('**/package-lock.json') != '' }}
+        if: ${{ hashFiles('**/package-lock.json') != '' }} # safe at step level; remove if still picky
         run: npm audit --omit=dev --audit-level=high || exit 1
 
   trivy-fs:
@@ -123,9 +145,10 @@ jobs:
           category: trivy-fs
 
   trivy-image:
-    name: Trivy (image) if Dockerfile present
+    name: "Trivy (image) if Dockerfile present"
+    needs: detect
+    if: ${{ needs.detect.outputs.has_dockerfile == 'true' }}
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('Dockerfile') != '' }}
     permissions:
       contents: read
       security-events: write
@@ -148,7 +171,7 @@ jobs:
           category: trivy-image
 
   dependency-review:
-    name: Dependency review (PRs)
+    name: "Dependency review (PRs)"
     if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
