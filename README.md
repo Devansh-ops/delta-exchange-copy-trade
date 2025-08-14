@@ -35,6 +35,47 @@ It can place **market** or **IOC limit** orders, has backoff/retries, idempotent
 
 ---
 
+## Docker
+
+You can either pull the **prebuilt image** or **build locally** via the Dockerfile 
+
+Image Name: `devanshsehgal02/delta-copytrader:latest`
+
+`docker-compose.yml`
+
+Option A — Use the image directly with docker
+```bash
+# pull the image
+docker pull devanshsehgal02/delta-copytrader:latest
+
+# run it (uses your .env and persists logs)
+docker run -d --name delta-multiplier \
+  --env-file .env \
+  -v "$(pwd)/logs:/app/logs" \
+  --restart unless-stopped \
+  devanshsehgal02/delta-copytrader:latest
+```
+
+Option B - Use docker compose
+
+- Make sure that the `.env` file in the same folder with `docker-compose.yml` file
+
+```bash
+services:
+  delta-copytrader:
+    image: devanshsehgal02/delta-copytrader:latest
+    container_name: delta-copytrader
+    pull_policy: always       # always pull the latest on start
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    stop_grace_period: 10s    # let the bot shut down cleanly
+```
+
+---
+
 ## Quick start
 
 ### 1) Prereqs
