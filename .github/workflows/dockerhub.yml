@@ -4,6 +4,9 @@ on:
   push:
     branches: [ "main" ]
     tags: [ "v*" ]   # tag releases like v1.2.3 to publish versioned images
+    paths-ignore:
+      - '.github/**'
+      - 'README.md'
   workflow_dispatch: {}
 
 permissions:
