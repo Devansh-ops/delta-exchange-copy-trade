@@ -97,32 +97,17 @@ jobs:
     name: "OSV Scanner (Python deps)"
     needs: detect
     if: ${{ needs.detect.outputs.has_requirements == 'true' || needs.detect.outputs.has_pyproject == 'true' || needs.detect.outputs.has_uv_lock == 'true' }}
-    runs-on: ubuntu-latest
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.2.1
     permissions:
       contents: read
       actions: read
       security-events: write
-    steps:
-      - uses: actions/checkout@v4
-
-      # OSV-Scanner action: scans manifests & lockfiles, supports uv.lock/pyproject
-      - name: Run OSV-Scanner (recursive, SARIF)
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: >-
-            --recursive
-            --format=sarif
-            --output=osv.sarif
-            .
-
-      - name: Ensure SARIF exists (belt & suspenders)
-        run: test -f osv.sarif || echo '{"version":"2.1.0","runs":[]}' > osv.sarif
-
-      - name: Upload SARIF (OSV)
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: osv.sarif
-          category: osv-scanner
+    with:
+      # Reusable workflow already sets format/output and uploads the SARIF.
+      # Only pass extra scan args you want.
+      scan-args: |-
+        --recursive
+        .
 
   deps-node:
     name: "Node dependency audit"
