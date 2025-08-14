@@ -31,9 +31,7 @@ It can place **market** or **IOC limit** orders, has backoff/retries, idempotent
 ├─ websocket\_orders\_positions.py  # the bot
 └─ logs/                    # runtime JSONL logs (git‑ignored)
 
-````
-
----
+```
 
 ## Docker
 
