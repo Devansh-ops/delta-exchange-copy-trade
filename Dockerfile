@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Minimal OS deps (curl only for uv install); purge afterwards to keep image small
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates build-essential \
+ && apt-get install -y --no-install-recommends curl ca-certificates build-essential procps \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -43,8 +43,9 @@ RUN mkdir -p /app/logs
 # RUN sudo ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ | sudo tee /etc/timezone
 
 # Healthcheck: is the process running?
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD pgrep -f "python .*main.py" >/dev/null || exit 1
+# match full command exactly (-f + -x), or looser fallback
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD pgrep -fx "python main.py" >/dev/null || pgrep -f "python3 .*main.py" >/dev/null || exit 1
 
 # Default command
 CMD ["python", "main.py"]
