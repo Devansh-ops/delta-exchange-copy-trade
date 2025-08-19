@@ -138,7 +138,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy filesystem scan -> SARIF
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           scan-type: fs
           scanners: "vuln,secret,misconfig"
@@ -165,7 +165,7 @@ jobs:
       - name: Build image for scan
         run: docker build -t app:scan .
       - name: Trivy image scan -> SARIF
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: app:scan
           format: sarif
