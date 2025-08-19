@@ -31,7 +31,7 @@ jobs:
       has_node_locks: ${{ steps.flags.outputs.has_node_locks }}
       has_dockerfile: ${{ steps.flags.outputs.has_dockerfile }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: flags
         run: |
           echo "Scanning tree for key files…"
@@ -58,7 +58,7 @@ jobs:
       matrix:
         language: [ "python" ]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
@@ -72,7 +72,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # scan full history (recommended)
 
@@ -115,7 +115,7 @@ jobs:
     if: ${{ needs.detect.outputs.has_node_locks == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: "lts/*"
@@ -136,7 +136,7 @@ jobs:
     env:
       TRIVY_NO_PROGRESS: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Trivy filesystem scan -> SARIF
         uses: aquasecurity/trivy-action@0.20.0
         with:
@@ -161,7 +161,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image for scan
         run: docker build -t app:scan .
       - name: Trivy image scan -> SARIF
@@ -185,7 +185,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
