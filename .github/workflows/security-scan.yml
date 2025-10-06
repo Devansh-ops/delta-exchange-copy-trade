@@ -97,7 +97,7 @@ jobs:
     name: "OSV Scanner (Python deps)"
     needs: detect
     if: ${{ needs.detect.outputs.has_requirements == 'true' || needs.detect.outputs.has_pyproject == 'true' || needs.detect.outputs.has_uv_lock == 'true' }}
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.2.1
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@v2.2.3
     permissions:
       contents: read
       actions: read
