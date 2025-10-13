@@ -59,11 +59,11 @@ jobs:
         language: [ "python" ]
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4
 
   secrets:
     name: "Secret scanning (gitleaks)"
@@ -88,7 +88,7 @@ jobs:
         run: test -f results.sarif || echo '{"version":"2.1.0","runs":[]}' > results.sarif
 
       - name: Upload SARIF (Gitleaks)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif   # <- gitleaks’ default filename
           category: gitleaks
@@ -147,7 +147,7 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
       - name: Upload SARIF (Trivy fs)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -173,7 +173,7 @@ jobs:
           ignore-unfixed: true
           severity: "CRITICAL,HIGH"
       - name: Upload SARIF (Trivy image)
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
